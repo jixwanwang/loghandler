@@ -9,21 +9,30 @@ import (
 )
 
 const (
-	statNameHeader = "X-Stat"
+	statNameHeader = "X-Stat-Key"
 )
 
 // loggingHandler is the http.Handler implementation for LoggingHandlerTo and its friends
 type loggingHandler struct {
 	writer  io.Writer
+	sl      StatsLogger
 	handler http.Handler
 }
 
 func (h loggingHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	t := time.Now()
-	logger := responseLogger{w: w}
+	logger := responseLogger{
+		w:     w,
+		start: time.Now(),
+	}
 	h.handler.ServeHTTP(&logger, req)
+	writeLog(h.writer, req, logger.start, logger.status,
+		logger.size, logger.duration)
+
 	statName := logger.Header().Get(statNameHeader)
-	writeLog(h.writer, req, t, logger.status, logger.size, statName)
+	if h.sl != nil {
+		h.sl.Timing(fmt.Sprintf("%s", statName), logger.duration)
+		h.sl.IncrBy(fmt.Sprintf("%s.%d", statName, logger.status), 1)
+	}
 }
 
 // responseLogger is wrapper of http.ResponseWriter that keeps track of its HTTP status
@@ -32,6 +41,8 @@ type responseLogger struct {
 	w        http.ResponseWriter
 	status   int
 	size     int
+	start    time.Time
+	duration time.Duration
 	statName string
 }
 
@@ -39,11 +50,17 @@ func (l *responseLogger) Header() http.Header {
 	return l.w.Header()
 }
 
+// Write stores the status and duration of the request. We don't track
+// the time the request is being sent to the client as it's the client's
+// responsibility to be fast.
 func (l *responseLogger) Write(b []byte) (int, error) {
 	if l.status == 0 {
 		// The status will be StatusOK if WriteHeader has not been called yet
 		l.status = http.StatusOK
 	}
+
+	l.duration = time.Now().Sub(l.start)
+
 	size, err := l.w.Write(b)
 	l.size += size
 	return size, err
@@ -57,7 +74,8 @@ func (l *responseLogger) WriteHeader(s int) {
 // buildCommonLogLine builds a log entry for req in Apache Common Log Format.
 // ts is the timestamp with which the entry should be logged.
 // status and size are used to provide the response HTTP status and size.
-func buildCommonLogLine(req *http.Request, ts time.Time, status int, size int, statName string) string {
+func buildCommonLogLine(req *http.Request, ts time.Time, status int, size int,
+	duration time.Duration) string {
 	username := "-"
 	if req.URL.User != nil {
 		if name := req.URL.User.Username(); name != "" {
@@ -65,7 +83,7 @@ func buildCommonLogLine(req *http.Request, ts time.Time, status int, size int, s
 		}
 	}
 
-	return fmt.Sprintf("%s - %s [%s] \"%s %s %s\" %d %d (%s)",
+	return fmt.Sprintf("%s - %s [%s] \"%s %s %s\" %d %d (%dμs)",
 		strings.Split(req.RemoteAddr, ":")[0],
 		username,
 		ts.Format("02/Jan/2006:15:04:05 -0700"),
@@ -74,15 +92,16 @@ func buildCommonLogLine(req *http.Request, ts time.Time, status int, size int, s
 		req.Proto,
 		status,
 		size,
-		statName,
+		duration/time.Microsecond,
 	)
 }
 
 // writeLog writes a log entry for req to w in Apache Common Log Format.
 // ts is the timestamp with which the entry should be logged.
 // status and size are used to provide the response HTTP status and size.
-func writeLog(w io.Writer, req *http.Request, ts time.Time, status, size int, statName string) {
-	line := buildCommonLogLine(req, ts, status, size, statName) + "\n"
+func writeLog(w io.Writer, req *http.Request, ts time.Time, status,
+	size int, duration time.Duration) {
+	line := buildCommonLogLine(req, ts, status, size, duration) + "\n"
 	fmt.Fprint(w, line)
 }
 
@@ -92,10 +111,15 @@ func writeLog(w io.Writer, req *http.Request, ts time.Time, status, size int, st
 // See http://httpd.apache.org/docs/2.2/logs.html#common for a description of this format.
 //
 // LoggingHandler always sets the ident field of the log to -
-func NewLoggingHandler(out io.Writer, h http.Handler) http.Handler {
-	return loggingHandler{out, h}
+func NewLoggingHandler(out io.Writer, sl StatsLogger, h http.Handler) http.Handler {
+	return loggingHandler{out, sl, h}
 }
 
 func SetStat(w http.ResponseWriter, name string) {
 	w.Header().Add(statNameHeader, name)
+}
+
+type StatsLogger interface {
+	Timing(key string, t time.Duration)
+	IncrBy(key string, delta int)
 }
