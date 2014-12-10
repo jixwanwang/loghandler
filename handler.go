@@ -71,6 +71,16 @@ func (l *responseLogger) WriteHeader(s int) {
 	l.status = s
 }
 
+// CloseNotify implements the CloseNotifier interface.
+// If the underlying ResponseWriter implements CloserNotifier, simply call that,
+// otherwise
+func (l *responseLogger) CloseNotify() <-chan bool {
+	if cn, ok := l.w.(http.CloseNotifier); ok {
+		return cn.CloseNotify()
+	}
+	return make(chan bool)
+}
+
 // buildCommonLogLine builds a log entry for req in Apache Common Log Format.
 // ts is the timestamp with which the entry should be logged.
 // status and size are used to provide the response HTTP status and size.
