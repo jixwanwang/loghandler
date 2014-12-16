@@ -78,7 +78,7 @@ func (l *responseLogger) CloseNotify() <-chan bool {
 	if cn, ok := l.w.(http.CloseNotifier); ok {
 		return cn.CloseNotify()
 	}
-	return make(chan bool)
+	return nil
 }
 
 // buildCommonLogLine builds a log entry for req in Apache Common Log Format.
